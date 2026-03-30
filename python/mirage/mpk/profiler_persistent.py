@@ -102,11 +102,14 @@ def export_to_perfetto_trace(
 
     tid_map = {}
     track_map = {}
+    task_counter_map = {}
+    event_label_map = {}
     for block_idx in range(num_blocks):
         pid = tgen.create_group(f"block_{block_idx}")
         for group_idx in range(num_groups):
             tid = pid.create_group(f"group_{group_idx}")
             tid_map[(block_idx, group_idx)] = tid
+            task_counter_map[(block_idx, group_idx)] = 0
 
     for i in range(1, len(profiler_buffer_host)):
         if profiler_buffer_host[i] == 0:
@@ -119,7 +122,10 @@ def export_to_perfetto_trace(
             tag, num_blocks, num_groups
         )
 
-        event = event_name_list[event_idx] + f"_{event_no}"
+        task_graph_idx = event_no
+        counter_key = (block_idx, group_idx)
+        label_key = (block_idx, group_idx, task_graph_idx)
+        base_event = event_name_list[event_idx]
         tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
@@ -129,10 +135,20 @@ def export_to_perfetto_trace(
             track_map[(block_idx, group_idx, event_idx)] = track
 
         if event_type == EventType.kBegin.value:
+            counter = task_counter_map[counter_key]
+            task_counter_map[counter_key] += 1
+            event = f"{base_event}_{task_graph_idx}_{counter}"
+            event_label_map[label_key] = event
             track.open(timestamp, event)
         elif event_type == EventType.kEnd.value:
+            event = event_label_map.get(
+                label_key, f"{base_event}_{task_graph_idx}_unknown"
+            )
             track.close(timestamp)
         elif event_type == EventType.kInstant.value:
+            counter = task_counter_map[counter_key]
+            task_counter_map[counter_key] += 1
+            event = f"{base_event}_{task_graph_idx}_{counter}"
             track.instant(timestamp, event)
 
     tgen.flush()

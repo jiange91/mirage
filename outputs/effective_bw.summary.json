@@ -1,0 +1,44 @@
+[
+  {
+    "task_name": "TASK_EMBEDDING",
+    "count": 1,
+    "total_bytes": 1050738752,
+    "total_us": 14.688,
+    "average_effective_bandwidth_gbps": 71537.22440087145
+  },
+  {
+    "task_name": "TASK_LINEAR_SWAPAB_HOPPER",
+    "count": 160,
+    "total_bytes": 296255488,
+    "total_us": 6930.0160000000005,
+    "average_effective_bandwidth_gbps": 42.74961096770916
+  },
+  {
+    "task_name": "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER",
+    "count": 128,
+    "total_bytes": 170131456,
+    "total_us": 3593.311999999999,
+    "average_effective_bandwidth_gbps": 47.346697420096014
+  },
+  {
+    "task_name": "TASK_PAGED_ATTENTION_HOPPER",
+    "count": 64,
+    "total_bytes": 2283012096,
+    "total_us": 705.9200000000002,
+    "average_effective_bandwidth_gbps": 3234.094650951948
+  },
+  {
+    "task_name": "TASK_RMS_NORM_HOPPER",
+    "count": 16,
+    "total_bytes": 393216,
+    "total_us": 34.01599999999999,
+    "average_effective_bandwidth_gbps": 11.559736594543748
+  },
+  {
+    "task_name": "TASK_SILU_MUL",
+    "count": 32,
+    "total_bytes": 688128,
+    "total_us": 202.17600000000002,
+    "average_effective_bandwidth_gbps": 3.4036087369420702
+  }
+]

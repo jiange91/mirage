@@ -134,7 +134,9 @@ __global__ void init_kernel(RuntimeConfig config) {
     // initialize metadata
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE)
     for (int i = 0; i < config.total_num_requests; i++) {
-      config.step[i] = 0;
+      // Preserve host-seeded step values. The benchmark harness uses this to
+      // enter the decode path directly without running a prefill batch first.
+      config.step[i] = config.step[i];
     }
     *config.next_request_id = 0;
     for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
@@ -286,7 +288,8 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Add new prefill requests until we reach capacity
+  // Add new requests until we reach capacity. The host can seed step[] to
+  // prompt_length[] to force a decode-only benchmark path.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
          num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
     int next_request_id = *config.next_request_id;
@@ -296,17 +299,23 @@ __device__ __forceinline__ bool
     config.request_ids[num_reqs] = next_request_id;
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
-    // Prefill request
-    int num_new_tokens = min(config.prompt_length[next_request_id],
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    int step = config.step[next_request_id];
+    int num_new_tokens = config.prompt_length[next_request_id] - step;
+    if (num_new_tokens > 0) {
+      num_new_tokens =
+          min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    } else {
+      num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    }
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
-          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + j];
+          config.tokens[next_request_id * MPK_MAX_SEQ_LENGTH + step + j];
     }
-    int num_new_pages = (num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
+    int num_new_pages =
+        (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
     config.paged_kv_last_page_len_buffer[num_reqs] =
-        num_new_tokens % MPK_PAGE_SIZE;
+        (step + num_new_tokens) % MPK_PAGE_SIZE;
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
           config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
@@ -648,7 +657,11 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #ifdef MPK_ENABLE_PROFILING
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_START(task_desc->task_type, task_counter);
+      // Encode the task's position in the task graph so the exported trace can
+      // be joined directly with task_graph_*.json.
+      uint32_t task_graph_idx =
+          static_cast<uint32_t>(get_task_position_index(task_ids[queue_pos]));
+      PROFILER_EVENT_START(task_desc->task_type, task_graph_idx);
     }
 #endif
 
@@ -671,7 +684,10 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #ifdef MPK_ENABLE_PROFILING
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_END(task_desc->task_type, task_counter++);
+      uint32_t task_graph_idx =
+          static_cast<uint32_t>(get_task_position_index(task_ids[queue_pos]));
+      PROFILER_EVENT_END(task_desc->task_type, task_graph_idx);
+      task_counter++;
     }
 #endif
 
@@ -1197,6 +1213,16 @@ extern "C" void init_persistent_kernel(std::vector<void *> meta_tensors,
     // }
     all_tasks.push_back(task_desc);
   }
+
+#ifdef MPK_ENABLE_PROFILING
+  // The persistent profiler stores the event suffix in a 13-bit field.
+  // We use that field for the task's position in all_tasks so the trace can be
+  // joined directly with task_graph_*.json.
+  if (profiler_buffer != nullptr) {
+    assert(all_tasks.size() < (1u << 13) &&
+           "Too many tasks to encode task_graph index in profiler events");
+  }
+#endif
 
   // Initialize worker queue last task id
   // Each worker now maintains a local and a remote worker queue
