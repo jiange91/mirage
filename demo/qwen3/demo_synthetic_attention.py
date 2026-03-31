@@ -1,6 +1,4 @@
 import argparse
-import os
-import time
 
 import torch
 
@@ -102,6 +100,7 @@ def main():
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--num-q-heads", type=int, default=8)
     parser.add_argument("--num-kv-heads", type=int, default=1)
+    parser.add_argument("--split-kv", action="store_true")
     parser.add_argument(
         "--seq-lens",
         default="8,16,24,32,40,48,56,64",
@@ -110,11 +109,16 @@ def main():
     parser.add_argument("--warmup-iters", type=int, default=5)
     parser.add_argument("--benchmark-iters", type=int, default=20)
     args = parser.parse_args()
+    args.max_num_pages = 64
+    args.max_num_batched_requests = 32
+    args.max_num_batched_tokens = 32
+    args.max_seq_length = 512
 
     if args.num_q_heads % args.num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
 
-    seq_lens = parse_seq_lens(args.seq_lens, args.max_num_batched_requests)
+    # seq_lens = parse_seq_lens(args.seq_lens, args.max_num_batched_requests)
+    seq_lens = [511] * 32
 
     try:
         import mirage as mi
@@ -167,6 +171,7 @@ def main():
     )
 
     fused_qkv_dim = (args.num_q_heads + 2 * args.num_kv_heads) * args.head_dim
+    num_kv_cache_chunks = max(1, args.max_seq_length // 256)
     attn_input_torch = torch.randn(
         (args.max_num_batched_tokens, fused_qkv_dim),
         dtype=torch.bfloat16,
@@ -209,18 +214,77 @@ def main():
     )
     attn_out = mpk.attach_input(torch_tensor=attn_out_torch, name="attn_out")
 
-    mpk.paged_attention_layer(
-        input=attn_input,
-        k_cache=k_cache,
-        v_cache=v_cache,
-        q_norm=q_norm,
-        k_norm=k_norm,
-        cos_pos_embed=cos_pos_embed,
-        sin_pos_embed=sin_pos_embed,
-        output=attn_out,
-        grid_dim=(args.max_num_batched_requests, args.num_kv_heads, 1),
-        block_dim=(128, 1, 1),
-    )
+    if args.split_kv:
+        lse = mpk.new_tensor(
+            dims=(
+                args.max_num_batched_tokens,
+                num_kv_cache_chunks * args.num_q_heads // args.num_kv_heads,
+                args.num_kv_heads,
+            ),
+            strides=(
+                num_kv_cache_chunks * args.num_q_heads,
+                1,
+                num_kv_cache_chunks * args.num_q_heads // args.num_kv_heads,
+            ),
+            dtype=mi.float32,
+            name="lse",
+            io_category="cuda_tensor",
+        )
+        attn_out_tmp = mpk.new_tensor(
+            dims=(
+                args.max_num_batched_tokens,
+                num_kv_cache_chunks * args.num_q_heads // args.num_kv_heads * args.head_dim,
+                args.num_kv_heads,
+            ),
+            strides=(
+                num_kv_cache_chunks * args.num_q_heads,
+                1,
+                num_kv_cache_chunks * args.num_q_heads // args.num_kv_heads * args.head_dim,
+            ),
+            dtype=mi.bfloat16,
+            name="attn_out_tmp",
+            io_category="cuda_tensor",
+        )
+
+        mpk.paged_attention_split_kv_layer(
+            input=attn_input,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            q_norm=q_norm,
+            k_norm=k_norm,
+            cos_pos_embed=cos_pos_embed,
+            sin_pos_embed=sin_pos_embed,
+            lse=lse,
+            output=attn_out_tmp,
+            attention_params=(args.num_q_heads, num_kv_cache_chunks),
+            grid_dim=(
+                args.max_num_batched_requests,
+                args.num_kv_heads,
+                num_kv_cache_chunks,
+            ),
+            block_dim=(128, 1, 1),
+        )
+        mpk.paged_attention_split_kv_merge_layer(
+            lse=lse,
+            output_tmp=attn_out_tmp,
+            output=attn_out,
+            attention_params=(args.num_q_heads, num_kv_cache_chunks),
+            grid_dim=(args.max_num_batched_requests, args.num_kv_heads, 1),
+            block_dim=(128, 1, 1),
+        )
+    else:
+        mpk.paged_attention_layer(
+            input=attn_input,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            q_norm=q_norm,
+            k_norm=k_norm,
+            cos_pos_embed=cos_pos_embed,
+            sin_pos_embed=sin_pos_embed,
+            output=attn_out,
+            grid_dim=(args.max_num_batched_requests, args.num_kv_heads, 1),
+            block_dim=(128, 1, 1),
+        )
 
     results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
     with open(f"task_graph_{rank}.json", "w") as f:
@@ -251,7 +315,7 @@ def main():
     print(
         "Per-step shape: "
         f"requests={args.max_num_batched_requests}, q_heads={args.num_q_heads}, "
-        f"kv_heads={args.num_kv_heads}, head_dim={args.head_dim}"
+        f"kv_heads={args.num_kv_heads}, head_dim={args.head_dim}, split_kv={args.split_kv}"
     )
 
 
