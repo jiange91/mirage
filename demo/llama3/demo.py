@@ -162,7 +162,8 @@ def prepare_test_prompt():
 # ============================================================================
 
 def prepare_input_tensors(model, tokenizer, messages, args, use_mirage=True):
-    target_prompt_len = 65  # Benchmark knob: exact prompt length in tokens
+    target_prompt_len = 64  # Benchmark knob: exact prompt length in tokens
+    benchmark_num_decode_tokens = 100  # Benchmark knob: number of decode tokens to run
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -172,15 +173,16 @@ def prepare_input_tensors(model, tokenizer, messages, args, use_mirage=True):
     print("Model input id shape:", model_inputs.input_ids.shape)
     num_requests = args.max_num_batched_requests if use_mirage else 1
     prompt_len = model_inputs.input_ids.shape[-1]
-    benchmark_seq_len = prompt_len + 1
+    benchmark_seq_len = prompt_len + benchmark_num_decode_tokens
     
     # Benchmark-only hardcode: seed runtime state so the first MPK batch takes
-    # the decode path and processes exactly one token.
+    # the decode path and processes a fixed number of tokens.
     tokens = torch.full((num_requests, benchmark_seq_len), 0, dtype=torch.long, device="cuda")
     for r in range(num_requests):
         for i in range(prompt_len):
             tokens[r, i] = model_inputs.input_ids[0, i]
-        tokens[r, prompt_len] = model_inputs.input_ids[0, prompt_len - 1]
+        for i in range(benchmark_num_decode_tokens):
+            tokens[r, prompt_len + i] = model_inputs.input_ids[0, prompt_len - 1]
     prompt_lengths = torch.full((num_requests,), prompt_len, dtype=torch.int, device="cuda")
 
     # Prepare position embeddings
@@ -190,9 +192,12 @@ def prepare_input_tensors(model, tokenizer, messages, args, use_mirage=True):
     # Prepare control tensors
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
     output_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
-    input_tokens[0, 0] = tokens[0, prompt_len]
+    for i in range(benchmark_num_decode_tokens):
+        input_tokens[i, 0] = tokens[0, prompt_len + i]
     step = torch.full((num_requests, ), prompt_len, dtype=torch.int32, device="cuda")
-    num_new_tokens = torch.full((num_requests, ), 1, dtype=torch.int32, device="cuda")
+    num_new_tokens = torch.full(
+        (num_requests, ), benchmark_num_decode_tokens, dtype=torch.int32, device="cuda"
+    )
 
     return {
         'tokens': tokens,
@@ -790,13 +795,13 @@ def build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_f
     x = add_embedding_layer(mpk, inputs, tensors, config, spec_decode_config)
     
     # Add transformer layers
-    for i, layer in enumerate(model.model.layers[:1]):
+    for i, layer in enumerate(model.model.layers):
         x = add_transformer_layer(
             mpk, i, layer, x, inputs, tensors, config, world_size, spec_decode_config, model, args
         )
     
     # Add final layers
-    # output = add_final_layers(mpk, x, model, config, tensors, spec_decode_config, args)
+    output = add_final_layers(mpk, x, model, config, tensors, spec_decode_config, args)
     
     # Add verification layer for speculative decoding
     if spec_decode_config and spec_tokens is not None:

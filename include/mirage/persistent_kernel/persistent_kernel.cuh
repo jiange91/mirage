@@ -58,6 +58,8 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
+constexpr int MPK_BENCHMARK_NUM_DECODE_TOKENS = 100;
+
 #ifndef CUDA_CHECK
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
@@ -261,7 +263,9 @@ __device__ __forceinline__ bool
             min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       } else {
         // Decode requests
-        num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = min(
+            MPK_BENCHMARK_NUM_DECODE_TOKENS,
+            MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
       }
       // Move tokens to input_tokens
       for (int j = 0; j < num_new_tokens; j++) {
@@ -305,7 +309,9 @@ __device__ __forceinline__ bool
       num_new_tokens =
           min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
     } else {
-      num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      num_new_tokens = min(
+          MPK_BENCHMARK_NUM_DECODE_TOKENS,
+          MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
     }
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
