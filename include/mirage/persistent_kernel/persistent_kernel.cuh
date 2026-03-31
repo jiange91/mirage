@@ -58,7 +58,7 @@ using namespace kernel;
 #endif
 #define INIT_NUM_THREADS 128
 
-constexpr int MPK_BENCHMARK_NUM_DECODE_TOKENS = 100;
+constexpr int MPK_BENCHMARK_NUM_DECODE_TOKENS = 1;
 
 #ifndef CUDA_CHECK
 #define CUDA_CHECK(call)                                                       \
