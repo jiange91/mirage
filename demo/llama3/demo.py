@@ -54,6 +54,11 @@ def parse_arguments():
         default=True,
         help="Not use the cutlass version kernel.",
     )
+    parser.add_argument(
+        "--dummy-unfused-rope",
+        action="store_true",
+        help="Mimic unfused RoPE by inserting an extra identity task before attention.",
+    )
     
     return parser.parse_args()
 
@@ -267,11 +272,7 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
         profiler_tensor = None
     
     # Setup speculative decoding configuration
-    spec_decode_config = mi.speculative.spec_decode_class(
-        args.spec_decode,
-        ngram_size=args.ngram_size,
-        spec_length=args.spec_length,
-    )
+    spec_decode_config = None
     
     # Create auxiliary buffers for paged KV and QO
     qo_indptr_buffer = torch.empty(
@@ -376,6 +377,14 @@ def create_intermediate_tensors(mpk, config, spec_decode_config, world_size, arg
         name="attn_in",
         io_category="cuda_tensor",
     )
+
+    if args.dummy_unfused_rope:
+        tensors['attn_in_identity'] = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, config['fused_outdim_1'] // world_size),
+            dtype=mi.bfloat16,
+            name="attn_in_identity",
+            io_category="cuda_tensor",
+        )
     
     tensors['attn_out'] = mpk.new_tensor(
         dims=(args.max_num_batched_tokens, config['num_local_q_heads'] * config['head_dim']),
@@ -531,6 +540,20 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         grid_dim=(grid_for_rmsnorm_linear_layer(w_qkv.dim(0)), 1, 1),
         block_dim=(attn_in_block_dim, 1, 1),
     )
+
+    attn_input = tensors['attn_in']
+    cos_pos_embed = inputs['cos_pos_embed']
+    sin_pos_embed = inputs['sin_pos_embed']
+    if args.dummy_unfused_rope:
+        mpk.identity_layer(
+            input=tensors['attn_in'],
+            output=tensors['attn_in_identity'],
+            grid_dim=(args.max_num_batched_tokens, 1, 1),
+            block_dim=(attn_in_block_dim, 1, 1),
+        )
+        attn_input = tensors['attn_in_identity']
+        cos_pos_embed = None
+        sin_pos_embed = None
     
     # 2. Attention computation (Llama3 doesn't use q_norm/k_norm)
     k_cache = mpk.attach_input(
@@ -545,26 +568,26 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
     attn_out_block_dim = get_block_dim()
     if spec_decode_config:
         mpk.single_batch_extend_attention_layer(
-            input=tensors['attn_in'],
+            input=attn_input,
             k_cache=k_cache,
             v_cache=v_cache,
             q_norm=None,
             k_norm=None,
-            cos_pos_embed=inputs['cos_pos_embed'],
-            sin_pos_embed=inputs['sin_pos_embed'],
+            cos_pos_embed=cos_pos_embed,
+            sin_pos_embed=sin_pos_embed,
             output=tensors['attn_out'],
             grid_dim=(1, config['num_local_kv_heads'], 1),
             block_dim=(attn_out_block_dim, 1, 1),
         )
     else:
         mpk.paged_attention_layer(
-            input=tensors['attn_in'],
+            input=attn_input,
             k_cache=k_cache,
             v_cache=v_cache,
             q_norm=None,
             k_norm=None,
-            cos_pos_embed=inputs['cos_pos_embed'],
-            sin_pos_embed=inputs['sin_pos_embed'],
+            cos_pos_embed=cos_pos_embed,
+            sin_pos_embed=sin_pos_embed,
             output=tensors['attn_out'],
             grid_dim=(args.max_num_batched_requests, config['num_local_kv_heads'], 1),
             block_dim=(attn_out_block_dim, 1, 1),
